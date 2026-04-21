@@ -1,36 +1,31 @@
 # =========================================
 # Dependencies
 # =========================================
-# Ignore all node_modules folders found in any directory
 node_modules/
 
 # =========================================
 # Python Specific
 # =========================================
-# Ignore the virtual environment folder in the backend
 backend/venv/
 backend/.venv/
-
-# Ignore Python cache files and compiled files
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+*.egg
 
 # =========================================
 # Next.js / Frontend Specific
 # =========================================
-# Ignore the build output and cache folders
 .next/
 out/
-
-# Ignore TypeScript build info
 *.tsbuildinfo
 next-env.d.ts
 
 # =========================================
-# Environment Variables
+# Environment Variables (CRITICAL - contains API keys)
 # =========================================
-# Ignore all local environment variables
-# It's critical to NOT commit these files to Git
 .env
 .env.*
 !.env.example
@@ -43,12 +38,17 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 temp_*
+temp_audio.wav
 
 # =========================================
 # IDE & OS Files
 # =========================================
 .DS_Store
+Thumbs.db
 .vscode/
+.idea/
+*.swp
+*.swo
 
 # =========================================
 # Deployment & Build Artifacts
@@ -56,3 +56,29 @@ temp_*
 .vercel/
 build/
 coverage/
+
+# =========================================
+# ML Model Cache (downloaded at runtime)
+# =========================================
+*.safetensors
+*.bin
+*.pt
+*.h5
+
+# =========================================
+# Test & Debug Files
+# =========================================
+backend/test_gemini*.py
+backend/test_output.txt
+backend/test_media_logic.py
+
+# =========================================
+# Deepfake test images (large binary files)
+# =========================================
+backend/fake_test.jpg
+backend/output_deepfake_explainability*.jpg
+
+# =========================================
+# Videos folder (large binary files)
+# =========================================
+videos/
