@@ -46,6 +46,7 @@ cachetools
 streamlit
 tavily-python
 twilio
+groq
 
 
 

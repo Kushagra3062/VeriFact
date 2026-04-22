@@ -21,7 +21,7 @@ from PIL import Image
 import pytesseract
 
 from moviepy import VideoFileClip
-from transformers import pipeline as hf_pipeline
+from groq import Groq
 
 # ---------------- Twilio Imports (NEW) ----------------
 from twilio.rest import Client as TwilioClient
@@ -37,18 +37,9 @@ import requests
 app = FastAPI()
 cache = TTLCache(maxsize=500, ttl=3600)
 
-# ---------------- Singleton Whisper Model ----------------
-# Cache the model so it's loaded once (~300MB) rather than per-request
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB upload limit
-_transcriber = None
-
-def get_transcriber():
-    global _transcriber
-    if _transcriber is None:
-        print("🔄 Loading Whisper model (first time only)...")
-        _transcriber = hf_pipeline("automatic-speech-recognition", model="openai/whisper-base")
-        print("✅ Whisper model loaded and cached.")
-    return _transcriber
+# ---------------- Groq Whisper API (Cloud-based transcription) ----------------
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB (Groq API limit)
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 @app.get("/")
 def read_root():
@@ -131,36 +122,38 @@ def get_text_from_image_server(image_path):
         return None
 
 def get_text_from_media_server(media_path):
+    """Transcribes media using Groq's cloud Whisper API (no local model needed)."""
     audio_path_to_process = media_path
     video = None
     try:
-        print("🎤 Transcribing media file...")
+        print("🎤 Transcribing media file via Groq Whisper API...")
         if media_path.lower().endswith(('.mp4', '.mov', '.avi')):
             print("📹 Video file detected. Extracting audio...")
             video = VideoFileClip(media_path)
             audio_path_to_process = "temp_audio.wav"
             video.audio.write_audiofile(audio_path_to_process, codec='pcm_s16le')
-            # Close video immediately to free FFmpeg memory
             video.close()
             video = None
             gc.collect()
 
-        transcriber = get_transcriber()
-        result = transcriber(audio_path_to_process, return_timestamps=True)
+        with open(audio_path_to_process, "rb") as audio_file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=(os.path.basename(audio_path_to_process), audio_file.read()),
+                model="whisper-large-v3",
+                response_format="text",
+            )
 
         print("✅ Transcription complete.")
-        return result["text"]
+        return transcription
     except Exception as e:
         print(f"❌ Error transcribing media: {e}")
         return None
     finally:
-        # Always close video if still open
         if video is not None:
             try:
                 video.close()
             except Exception:
                 pass
-        # Always clean up temp audio
         if audio_path_to_process != media_path and os.path.exists(audio_path_to_process):
             try:
                 os.remove(audio_path_to_process)

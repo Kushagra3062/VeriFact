@@ -23,7 +23,7 @@ from langdetect import detect
 from newspaper import Article, Config
 from PIL import Image
 import pytesseract
-from transformers import pipeline as hf_pipeline
+from groq import Groq
 from moviepy import VideoFileClip
 
 
@@ -117,19 +117,11 @@ def get_text_from_image(uploaded_file):
         print(f"❌ Error extracting from image: {e}")
         return None
 
-# Singleton Whisper model — shared with server.py to avoid loading ~300MB per request
-_transcriber = None
-
-def _get_transcriber():
-    global _transcriber
-    if _transcriber is None:
-        print("🔄 Loading Whisper model (first time only)...")
-        _transcriber = hf_pipeline("automatic-speech-recognition", model="openai/whisper-base")
-        print("✅ Whisper model loaded and cached.")
-    return _transcriber
+# Groq Whisper API client for cloud-based transcription (no local model needed)
+_groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 def get_text_from_media(uploaded_file):
-    """Transcribes text from an audio or video file using Whisper."""
+    """Transcribes text from an audio or video file using Groq's Whisper API."""
     temp_dir = "temp_media"
     file_path = None
     audio_path = None
@@ -141,12 +133,11 @@ def get_text_from_media(uploaded_file):
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        print("🎤 Transcribing media file (this may take a moment)...")
+        print("🎤 Transcribing media file via Groq Whisper API...")
         if file_path.lower().endswith(('.mp4', '.mov', '.avi')):
             video = VideoFileClip(file_path)
             audio_path = os.path.join(temp_dir, "temp_audio.wav")
             video.audio.write_audiofile(audio_path, codec='pcm_s16le')
-            # Close video immediately to free FFmpeg memory
             video.close()
             video = None
             gc.collect()
@@ -154,9 +145,12 @@ def get_text_from_media(uploaded_file):
         else:
             media_to_transcribe = file_path
 
-        transcriber = _get_transcriber()
-        result = transcriber(media_to_transcribe)
-        text = result["text"]
+        with open(media_to_transcribe, "rb") as audio_file:
+            text = _groq_client.audio.transcriptions.create(
+                file=(os.path.basename(media_to_transcribe), audio_file.read()),
+                model="whisper-large-v3",
+                response_format="text",
+            )
 
         print("✅ Transcription complete.")
         return text
@@ -164,13 +158,11 @@ def get_text_from_media(uploaded_file):
         print(f"❌ Error transcribing media: {e}")
         return None
     finally:
-        # Always close video if still open
         if video is not None:
             try:
                 video.close()
             except Exception:
                 pass
-        # Clean up temporary files
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -333,8 +325,9 @@ def format_docs(docs):
 
 def sanitize_json(text):
     """Clean LLM output for reliable JSON parsing (smart quotes, etc.)."""
-    # Replace curly/smart quotes with straight quotes
-    text = text.replace('\u201c', '"').replace('\u201d', '"')  # " "
+    # Replace curly/smart double quotes with single quotes (NOT straight double quotes,
+    # which would break JSON when they appear inside string values)
+    text = text.replace('\u201c', "'").replace('\u201d', "'")  # " " → '
     text = text.replace('\u2018', "'").replace('\u2019', "'")  # ' '
     # Replace en/em dashes with regular hyphens
     text = text.replace('\u2013', '-').replace('\u2014', '-')
