@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.schema import Document
+from langchain_groq import ChatGroq
+from langchain_core.documents import Document
 from tavily import TavilyClient
 
 from deep_translator import GoogleTranslator
@@ -22,8 +22,8 @@ from langdetect import detect
 from newspaper import Article, Config
 from PIL import Image
 import pytesseract
-# import whisper
-#from moviepy import VideoFileClip
+from transformers import pipeline
+from moviepy import VideoFileClip
 
 
 # ---------------- Setup & Configuration ----------------
@@ -32,7 +32,7 @@ load_dotenv()
 
 # --- API Keys & Tracing ---
 os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_TRACING_V2"] = "false" # Disabled to prevent forbidden errors
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LangSmith_API_KEY")
 API_KEY_FCTA = os.getenv("FACT_CHECK_API")
 TAVILY_API_KEY = os.getenv("TAVILY_API")
@@ -44,7 +44,39 @@ TAVILY_API_KEY = os.getenv("TAVILY_API")
 
 # --- Initialize Clients & Models ---
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+
+# Primary: Gemini | Fallback: Groq (for when Gemini quota is exhausted)
+try:
+    llm_gemini = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=os.getenv("GEMINI_API_KEY"))
+except Exception:
+    llm_gemini = None
+
+try:
+    llm_groq = ChatGroq(model_name="llama-3.1-8b-instant", groq_api_key=os.getenv("GROQ_API_KEY"))
+except Exception:
+    llm_groq = None
+
+# Active LLM — start with Gemini, fallback handled at invocation time
+llm = llm_gemini or llm_groq
+
+async def invoke_with_fallback(chain_prompt, inputs):
+    """Try Gemini first; if rate-limited, fall back to Groq."""
+    parser = StrOutputParser()
+    for model, name in [(llm_gemini, "Gemini"), (llm_groq, "Groq")]:
+        if model is None:
+            continue
+        try:
+            chain = chain_prompt | model | parser
+            result = await chain.ainvoke(inputs)
+            return result
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "rate_limit" in err_str:
+                print(f"⚠️ {name} rate-limited, trying next model...")
+                continue
+            else:
+                raise
+    raise RuntimeError("All LLM providers are unavailable. Please check your API keys and quotas.")
 
 # --- Trusted Domains for Web Search ---
 trusted_domains = [
@@ -84,48 +116,48 @@ def get_text_from_image(uploaded_file):
         print(f"❌ Error extracting from image: {e}")
         return None
 
-# def get_text_from_media(uploaded_file):
-#     """Transcribes text from an audio or video file using Whisper."""
-#     try:
-#         # Save the uploaded file to a temporary path for processing
-#         temp_dir = "temp_media"
-#         os.makedirs(temp_dir, exist_ok=True)
-#         file_path = os.path.join(temp_dir, uploaded_file.name)
+def get_text_from_media(uploaded_file):
+    """Transcribes text from an audio or video file using Whisper."""
+    try:
+        # Save the uploaded file to a temporary path for processing
+        temp_dir = "temp_media"
+        os.makedirs(temp_dir, exist_ok=True)
+        file_path = os.path.join(temp_dir, uploaded_file.name)
 
-#         with open(file_path, "wb") as f:
-#             f.write(uploaded_file.getbuffer())
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
 
-#         with st.spinner("🎤 Transcribing media file (this may take a moment)..."):
-#             # Check if it's a video file and extract audio
-#             if file_path.lower().endswith(('.mp4', '.mov', '.avi')):
-#                 video = VideoFileClip(file_path)
-#                 audio_path = os.path.join(temp_dir, "temp_audio.wav")
-#                 video.audio.write_audiofile(audio_path, codec='pcm_s16le')
-#                 media_to_transcribe = audio_path
-#             else:
-#                 media_to_transcribe = file_path
+        print("🎤 Transcribing media file (this may take a moment)...")
+        # Check if it's a video file and extract audio
+        if file_path.lower().endswith(('.mp4', '.mov', '.avi')):
+            video = VideoFileClip(file_path)
+            audio_path = os.path.join(temp_dir, "temp_audio.wav")
+            video.audio.write_audiofile(audio_path, codec='pcm_s16le')
+            media_to_transcribe = audio_path
+        else:
+            media_to_transcribe = file_path
 
-#             model = whisper.load_model("base")
-#             result = model.transcribe(media_to_transcribe)
-#             text = result["text"]
+        transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-base")
+        result = transcriber(media_to_transcribe)
+        text = result["text"]
 
-#             # Clean up temporary files
-#             os.remove(file_path)
-#             if 'audio_path' in locals() and os.path.exists(audio_path):
-#                 os.remove(audio_path)
-#             if not os.listdir(temp_dir):
-#                 os.rmdir(temp_dir)
+        # Clean up temporary files
+        os.remove(file_path)
+        if 'audio_path' in locals() and os.path.exists(audio_path):
+            os.remove(audio_path)
+        if not os.listdir(temp_dir):
+            os.rmdir(temp_dir)
 
-#         st.success("✅ Transcription complete.")
-#         return text
-#     except Exception as e:
-#         st.error(f"❌ Error transcribing media: {e}")
-#         # Clean up in case of error
-#         if 'file_path' in locals() and os.path.exists(file_path):
-#             os.remove(file_path)
-#         if 'audio_path' in locals() and os.path.exists(audio_path):
-#             os.remove(audio_path)
-#         return None
+        print("✅ Transcription complete.")
+        return text
+    except Exception as e:
+        print(f"❌ Error transcribing media: {e}")
+        # Clean up in case of error
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)
+        if 'audio_path' in locals() and os.path.exists(audio_path):
+            os.remove(audio_path)
+        return None
 
 # ---------------- Language Detection & Translation ----------------
 def detect_language(text):
@@ -152,11 +184,11 @@ def web_search(news):
             include_domains=trusted_domains,
             search_depth="advanced",
             include_raw_content=True,
-            max_results=10
+            max_results=5
         )
         docs = [
             Document(
-                page_content=(r.get("raw_content") or r.get("content") or "")[:4000],
+                page_content=(r.get("raw_content") or r.get("content") or "")[:1500],
                 metadata={"title": r.get("title", ""), "url": r.get("url", "")}
             ) for r in response.get("results", []) if (r.get("raw_content") or r.get("content"))
         ]
@@ -209,7 +241,7 @@ Summarize_prompt = ChatPromptTemplate.from_messages(
         ("user", "news:{news}")
     ]
 )
-summarizer = Summarize_prompt | llm | StrOutputParser()
+summarizer_prompt = Summarize_prompt  # alias for use with invoke_with_fallback
 
 # ---------------- Explanibility Chain ----------------
 explainability_prompt = ChatPromptTemplate.from_messages([
@@ -265,9 +297,22 @@ explainability_prompt = ChatPromptTemplate.from_messages([
      )
 ])
 
+# ---------------- Helper Functions ----------------
+def format_docs(docs):
+    """Concatenate document page_content into a single context string."""
+    return "\n\n".join(doc.page_content for doc in docs)
+
+def sanitize_json(text):
+    """Clean LLM output for reliable JSON parsing (smart quotes, etc.)."""
+    # Replace curly/smart quotes with straight quotes
+    text = text.replace('\u201c', '"').replace('\u201d', '"')  # " "
+    text = text.replace('\u2018', "'").replace('\u2019', "'")  # ' '
+    # Replace en/em dashes with regular hyphens
+    text = text.replace('\u2013', '-').replace('\u2014', '-')
+    return text
+
 # ---------------- Main Pipeline ----------------
-detection_chain = create_stuff_documents_chain(llm, detection_prompt)
-explanation_chain = create_stuff_documents_chain(llm, explainability_prompt)
+# Note: chains are built dynamically inside invoke_with_fallback()
 
 async def pipeline(news):
     """The main fact-checking pipeline."""
@@ -278,7 +323,7 @@ async def pipeline(news):
 
     # Step 1: Summarize input text
     print("✍️ Summarizing the claim...")
-    concise_news = await summarizer.ainvoke({"news": news})
+    concise_news = await invoke_with_fallback(Summarize_prompt, {"news": news})
     print(f"**Generated Summary:** {concise_news}")
 
     # Step 2 & 3: Run Google Fact Check and Web Search concurrently
@@ -290,13 +335,13 @@ async def pipeline(news):
     # Step 4: Process results and generate final verdict
     print("🧠 Analyzing evidence and making a decision...")
     if web_res:
-        verdict_output = await detection_chain.ainvoke(
-            {"context": web_res, "query": concise_news,"source_language":source_language}
+        verdict_output = await invoke_with_fallback(detection_prompt,
+            {"context": format_docs(web_res), "query": concise_news,"source_language":source_language}
         )
         try:
             match = re.search(r'\{.*\}', verdict_output, re.DOTALL)
             if match:
-                verdict = json.loads(match.group(0))
+                verdict = json.loads(sanitize_json(match.group(0)))
             else:
                 raise ValueError("No JSON object found in the model's decision response.")
         except (json.JSONDecodeError, ValueError) as e:
@@ -305,13 +350,13 @@ async def pipeline(news):
 
         # Only proceed to explanation if verdict was parsed successfully
         if verdict.get("decision") != "Error":
-            explanation = await explanation_chain.ainvoke(
-                {"context": web_res, "query": concise_news, "decision": verdict.get("decision"),"source_language":source_language}
+            explanation = await invoke_with_fallback(explainability_prompt,
+                {"context": format_docs(web_res), "query": concise_news, "decision": verdict.get("decision"),"source_language":source_language}
             )
             try:
                 match = re.search(r'\{.*\}', explanation, re.DOTALL)
                 if match:
-                    explanation_data = json.loads(match.group(0))
+                    explanation_data = json.loads(sanitize_json(match.group(0)))
                 else:
                     raise ValueError("No JSON object found in the model's explanation response.")
             except (json.JSONDecodeError, ValueError) as e:
@@ -327,10 +372,23 @@ async def pipeline(news):
             "explanation": "No web sources were found to analyze the claim."
         }
 
+    # Ensure fake_score is always a number
+    if "fake_score" in verdict:
+        try:
+            verdict["fake_score"] = int(verdict["fake_score"])
+        except (ValueError, TypeError):
+            verdict["fake_score"] = 0
+
+    # Convert Document objects to plain dicts for JSON serialization
+    serialized_web_results = [
+        {"title": doc.metadata.get("title", ""), "url": doc.metadata.get("url", "")}
+        for doc in web_res
+    ] if web_res else []
+
     return {
         "summary": concise_news,
         "fact_check_api": fact_check_res,
-        "web_results": web_res,
+        "web_results": serialized_web_results,
         "final_verdict": verdict,
         "explanation": explanation_data
     }

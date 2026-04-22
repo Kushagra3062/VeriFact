@@ -1,4 +1,4 @@
-# VeriFact: AI-Powered Misinformation Detection Platform
+# VeriFact: AI-Powered Misinformation Combating Platform
 
 [![Next.js](https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)

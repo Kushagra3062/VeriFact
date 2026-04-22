@@ -5,24 +5,49 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
     try {
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+        // Clean the backend URL from potential quotes and spaces
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/[",]/g, '').trim();
         if (!backendUrl) {
             return new Response(JSON.stringify({ error: 'Backend URL not configured' }), { status: 500 });
         }
 
+        // Diagnostic: Log all incoming headers
+        console.log("[api/analyze] Incoming Headers:");
+        req.headers.forEach((v, k) => console.log(`  ${k}: ${v}`));
+
         const frontendFormData = await req.formData();
         const text = frontendFormData.get('text');
         const url = frontendFormData.get('url');
-        const file = frontendFormData.get('file');
+        const fileValue = frontendFormData.get('file');
+
+        // Check if the input is a file upload
+        const isFile = fileValue && typeof fileValue !== 'string' && (fileValue instanceof Blob);
 
         let res: Response;
 
-        // Check if the input is a file upload
-        if (file instanceof File && file.size > 0) {
-            // A file exists, so we send it as multipart/form-data to the /analyze-file endpoint
-            const filePayload = new FormData();
-            filePayload.append('file', file);
+        if (isFile) {
+            const fileBlob = fileValue as Blob;
+            const fileName = (fileValue as any).name || 'uploaded_file';
+            
+            // CRITICAL FIX: Buffer the file content immediately.
+            // Next.js App Router can return 0-byte blobs from formData() if the
+            // underlying stream is consumed or GC'd before we read from the blob.
+            const buffer = await fileBlob.arrayBuffer();
+            console.log(`[api/analyze] File: ${fileName}, buffered ${buffer.byteLength} bytes, type: ${fileBlob.type}`);
+            
+            if (buffer.byteLength === 0) {
+                return new Response(JSON.stringify({ error: 'File upload failed — received 0 bytes. Please try again.' }), { 
+                    status: 400, 
+                    headers: { 'Content-Type': 'application/json' } 
+                });
+            }
 
+            // Reconstruct a fresh Blob from the buffered data
+            const freshBlob = new Blob([buffer], { type: fileBlob.type });
+            const filePayload = new FormData();
+            filePayload.append('file', freshBlob, fileName);
+
+            console.log(`[api/analyze] Forwarding to ${backendUrl}/analyze-file`);
             res = await fetch(`${backendUrl}/analyze-file`, {
                 method: 'POST',
                 body: filePayload,
@@ -41,9 +66,11 @@ export async function POST(req: Request) {
                 jsonPayload.url = url.trim();
                 jsonPayload.input_type = 'url';
             } else {
-                return new Response(JSON.stringify({ error: 'No valid text or URL input provided' }), { status: 400 });
+                console.error("[api/analyze] No valid input found. FormData keys:", Array.from(frontendFormData.keys()));
+                return new Response(JSON.stringify({ error: 'No valid text, URL, or file input provided' }), { status: 400 });
             }
 
+            console.log(`[api/analyze] Forwarding to ${backendUrl}/analyze (Type: ${jsonPayload.input_type})`);
             res = await fetch(`${backendUrl}/analyze`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -52,19 +79,29 @@ export async function POST(req: Request) {
         }
 
         // Handle the response from the backend
-        const body = await res.json();
+        const contentType = res.headers.get('content-type');
+        let body: any;
 
-        // If the backend returned an error status, forward it
-        if (!res.ok) {
-            const errorMessage = body.detail || body.error || 'Unknown backend error';
-            return new Response(JSON.stringify({ error: errorMessage }), { status: res.status });
+        if (contentType && contentType.includes('application/json')) {
+            const body = await res.json();
+            
+            // Forward the backend success/error status and JSON body
+            return new Response(JSON.stringify(body), {
+                status: res.status,
+                headers: { 'Content-Type': 'application/json' },
+            });
+        } else {
+            const textResponse = await res.text();
+            console.error(`[api/analyze] Backend returned non-JSON (${res.status}):`, textResponse.substring(0, 200));
+            return new Response(JSON.stringify({ 
+                error: 'Backend error', 
+                detail: textResponse.substring(0, 500),
+                status: res.status 
+            }), { 
+                status: 500,
+                headers: { 'Content-Type': 'application/json' }
+            });
         }
-
-        // If successful, forward the complete success response
-        return new Response(JSON.stringify(body), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-        });
 
     } catch (err: any) {
         // Handle network errors or other issues with the proxy itself

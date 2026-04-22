@@ -1,20 +1,41 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { analyzePayload } from '@/lib/misinfoClient';
+
+interface BufferedFile {
+    name: string;
+    type: string;
+    buffer: ArrayBuffer;
+}
 
 export default function UploadForm() {
     const router = useRouter();
     const [text, setText] = useState('');
     const [url, setUrl] = useState('');
-    const [file, setFile] = useState<File | null>(null);
+    const [file, setFile] = useState<BufferedFile | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    async function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
         const f = e.target.files?.[0] || null;
-        setFile(f || null);
+        if (f) {
+            console.log(`[UploadForm] File selected: ${f.name}, Size: ${f.size} bytes, Type: ${f.type}`);
+            try {
+                // CRITICAL: Read file content IMMEDIATELY on selection
+                // before the File reference can become stale
+                const buffer = await f.arrayBuffer();
+                console.log(`[UploadForm] File buffered: ${buffer.byteLength} bytes`);
+                setFile({ name: f.name, type: f.type, buffer });
+            } catch (err) {
+                console.error('[UploadForm] Failed to read file:', err);
+                setError('Failed to read the selected file. Please try again.');
+                setFile(null);
+            }
+        } else {
+            setFile(null);
+        }
     }
 
     async function onSubmit(e: React.FormEvent) {
@@ -29,13 +50,16 @@ export default function UploadForm() {
             return;
         }
 
-        const payload: { text?: string; url?: string; file?: File } = {};
+        const payload: { text?: string; url?: string; fileData?: { name: string; type: string; buffer: ArrayBuffer } } = {};
         if (trimmedText) payload.text = trimmedText;
         else if (trimmedUrl) payload.url = trimmedUrl;
-        else if (file) payload.file = file;
+        else if (file) payload.fileData = file;
 
         try {
             setSubmitting(true);
+            console.log(`[UploadForm] Submitting payload:`, { 
+                file: payload.fileData ? `${payload.fileData.name} (${payload.fileData.buffer.byteLength} bytes)` : 'none' 
+            });
             const result = await analyzePayload(payload);
 
             sessionStorage.setItem('lastAnalysis', JSON.stringify(result));

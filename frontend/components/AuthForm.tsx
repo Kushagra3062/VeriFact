@@ -11,8 +11,6 @@ import Link from "next/link"
 import { toast } from "sonner"
 import FormField from "@/components/FormField"
 import { useRouter } from "next/navigation";
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
-import { auth } from "@/firebase/client";
 
 
 type FormType = "sign-in" | "sign-up";
@@ -43,46 +41,34 @@ const AuthForm = ({ type }: { type: FormType }) => {
       if (type === "sign-up") {
         const { name, email, password } = values;
 
-        const userCredentials = await createUserWithEmailAndPassword(auth, email, password);
-
-        // Store user profile in Firestore via API route
+        // Call our JWT sign-up API
         const upRes = await fetch("/api/auth/sign-up", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ uid: userCredentials.user.uid, name, email }),
+          body: JSON.stringify({ name, email, password }),
         });
         const upJson = await upRes.json();
+        
         if (!upRes.ok || !upJson?.success) {
-          toast.error(upJson?.message || "Failed to create user profile.");
+          toast.error(upJson?.message || "Failed to create account.");
           return;
         }
-
-        // For the desired flow: do NOT establish a session on sign-up.
-        // Sign the user out locally so they land on the sign-in screen next.
-        try { await auth.signOut(); } catch {}
 
         toast.success("Account created successfully. Please sign in.")
         router.push('/sign-in')
       } else {
         const { email, password } = values;
 
-        const userCredentials = await signInWithEmailAndPassword(auth, email, password);
-
-        const idToken = await userCredentials.user.getIdToken();
-
-        if (!idToken) {
-          toast.error("Sign in failed. Please try again.");
-          return;
-        }
-
-        const sessRes = await fetch("/api/auth/session", {
+        // Call our JWT sign-in API
+        const sessRes = await fetch("/api/auth/sign-in", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ idToken }),
+          body: JSON.stringify({ email, password }),
         });
         const sessJson = await sessRes.json();
+        
         if (!sessRes.ok || !sessJson?.success) {
-          toast.error(sessJson?.message || "Sign in failed.");
+          toast.error(sessJson?.message || "Sign in failed. Check your credentials.");
           return;
         }
 

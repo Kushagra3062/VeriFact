@@ -18,8 +18,9 @@ from cachetools import TTLCache
 from newspaper import Article, Config
 from PIL import Image
 import pytesseract
-# import whisper
-# from moviepy.editor import VideoFileClip
+
+from moviepy import VideoFileClip
+from transformers import pipeline
 
 # ---------------- Twilio Imports (NEW) ----------------
 from twilio.rest import Client as TwilioClient
@@ -114,27 +115,27 @@ def get_text_from_image_server(image_path):
         print(f"❌ Error extracting from image: {e}")
         return None
 
-# def get_text_from_media_server(media_path):
-#     try:
-#         print("🎤 Transcribing media file...")
-#         audio_path_to_process = media_path
-#         if media_path.lower().endswith(('.mp4', '.mov', '.avi')):
-#             print("📹 Video file detected. Extracting audio...")
-#             video = VideoFileClip(media_path)
-#             audio_path_to_process = "temp_audio.wav"
-#             video.audio.write_audiofile(audio_path_to_process, codec='pcm_s16le')
-#
-#         model = whisper.load_model("base")
-#         result = model.transcribe(audio_path_to_process)
-#
-#         if audio_path_to_process != media_path and os.path.exists(audio_path_to_process):
-#             os.remove(audio_path_to_process)
-#
-#         print("✅ Transcription complete.")
-#         return result["text"]
-#     except Exception as e:
-#         print(f"❌ Error transcribing media: {e}")
-#         return None
+def get_text_from_media_server(media_path):
+    try:
+        print("🎤 Transcribing media file...")
+        audio_path_to_process = media_path
+        if media_path.lower().endswith(('.mp4', '.mov', '.avi')):
+            print("📹 Video file detected. Extracting audio...")
+            video = VideoFileClip(media_path)
+            audio_path_to_process = "temp_audio.wav"
+            video.audio.write_audiofile(audio_path_to_process, codec='pcm_s16le')
+
+        transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-base")
+        result = transcriber(audio_path_to_process, return_timestamps=True)
+
+        if audio_path_to_process != media_path and os.path.exists(audio_path_to_process):
+            os.remove(audio_path_to_process)
+
+        print("✅ Transcription complete.")
+        return result["text"]
+    except Exception as e:
+        print(f"❌ Error transcribing media: {e}")
+        return None
 
 # ---------------- Pipeline Runner (Existing) ----------------
 async def run_analysis_pipeline(input_text: str):
@@ -193,35 +194,56 @@ async def analyze_text_or_url(req: AnalyzeRequest):
 
 @app.post("/analyze-file")
 async def analyze_file(file: UploadFile = File(...)):
-    # --- Move the import here ---
-    from detect_real import analyze_image
-
-    """(Existing) Handles file uploads (images, media) which arrive as multipart/form-data."""
-    temp_path = f"temp_{file.filename}"
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
-
-    raw_text = None
+    """Handles file uploads with robust error handling and diagnostics."""
     try:
+        from detect_real import analyze_image
+    except ImportError:
+        print("Warning: detect_real.py dependencies not found.")
+
+    temp_path = f"temp_{file.filename}"
+    raw_text = None
+    
+    try:
+        content = await file.read()
+        print(f"Received file: {file.filename} ({len(content)} bytes)")
+        
+        if len(content) == 0:
+             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+             
+        with open(temp_path, "wb") as f:
+            f.write(content)
+
         ext = file.filename.split(".")[-1].lower()
         if ext in ["png", "jpg", "jpeg"]:
             raw_text = await asyncio.to_thread(get_text_from_image_server, temp_path)
-        # elif ext in ["mp3", "wav", "mp4", "mov", "avi"]:
-        #     raw_text = await asyncio.to_thread(get_text_from_media_server, temp_path)
+        elif ext in ["mp3", "wav", "mp4", "mov", "avi"]:
+            raw_text = await asyncio.to_thread(get_text_from_media_server, temp_path)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
+        if not raw_text or not raw_text.strip():
+            raise HTTPException(status_code=422, detail="Failed to extract text from media.")
+
+        print(f"Running analysis for: {raw_text[:50]}...")
         results = await run_analysis_pipeline(raw_text)
-        if results.get("error"): # Handle pipeline errors
+        
+        if isinstance(results, dict) and results.get("error"):
             raise HTTPException(status_code=500, detail=results["error"])
+            
         return {"success": True, "results": results}
+
     except Exception as e:
+        import traceback
+        print(f"Backend Error:\n{traceback.format_exc()}")
         if isinstance(e, HTTPException):
             raise e
-        raise HTTPException(status_code=500, detail=f"An error occurred during file processing: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except:
+                pass
 
 
 # ---------------- NEW WHATSAPP WEBHOOK ----------------
@@ -456,8 +478,8 @@ async def whatsapp_webhook(
                     f.write(media_data.content)
                 if content_type == "image":
                     raw_text = await asyncio.to_thread(get_text_from_image_server, temp_path)
-                # elif content_type in ["audio", "video"]:
-                #     raw_text = await asyncio.to_thread(get_text_from_media_server, temp_path)
+                elif content_type in ["audio", "video"]:
+                    raw_text = await asyncio.to_thread(get_text_from_media_server, temp_path)
             elif Body and re.search(r'https?://\S+', Body):
                 url = re.search(r'(https?://\S+)', Body).group(1)
                 raw_text = await asyncio.to_thread(get_text_from_url_server, url)
