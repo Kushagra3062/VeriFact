@@ -85,7 +85,9 @@ export default function ResultsPage() {
     const webResults = Array.isArray(data?.web_results) ? data.web_results : [];
     const apiError = data?.error || (typeof data?.detail === 'string' ? String(data.detail) : '');
 
-    const score = typeof fakeScore === 'number' ? fakeScore : null;
+    // Backend returns fake_score (0 = truthful, 100 = fake).
+    // Invert it so the UI shows "Truthfulness Score" (0 = fake, 100 = truthful).
+    const score = typeof fakeScore === 'number' ? (100 - fakeScore) : null;
 
     const getScoreColor = (s: number | null) => {
         if (s === null) return "text-gray-400";

@@ -503,6 +503,7 @@ async def whatsapp_webhook(
 
         raw_text = None
         temp_path = None
+        cache_key = None
         try:
             # --- (your existing media, URL, and text handling code) ---
             if NumMedia > 0 and MediaUrl0:
@@ -514,37 +515,33 @@ async def whatsapp_webhook(
                     f.write(media_data.content)
                 if content_type == "image":
                     raw_text = await asyncio.to_thread(get_text_from_image_server, temp_path)
+                    if raw_text:
+                        cache_key = f"image_text:{raw_text[:50]}"
                 elif content_type in ["audio", "video"]:
                     raw_text = await asyncio.to_thread(get_text_from_media_server, temp_path)
+                    if raw_text:
+                        cache_key = f"media_text:{raw_text[:50]}"
             elif Body and re.search(r'https?://\S+', Body):
                 url = re.search(r'(https?://\S+)', Body).group(1)
+                cache_key = f"url:{url}"
                 raw_text = await asyncio.to_thread(get_text_from_url_server, url)
             elif Body:
                 raw_text = Body
+                cache_key = f"text:{Body}"
 
             # --- Run your pipeline ---
             if raw_text:
-                results = await run_analysis_pipeline(raw_text)
+                if cache_key and cache_key in cache:
+                    print(f"✅ Returning cached response for WhatsApp: {cache_key}")
+                    results = cache[cache_key]
+                else:
+                    results = await run_analysis_pipeline(raw_text)
+                    if isinstance(results, dict) and "error" not in results and cache_key:
+                        cache[cache_key] = results
 
-                # ---- 1️⃣ Create Summary Message ----
-                verdict = results.get("final_verdict", {})
-                explanation = results.get("explanation", {})
-                print("EXPLANATION:", explanation)
-                emoji_map = {"True": "✅", "False": "❌", "Misleading": "⚠️", "Unverifiable": "❓", "Error": "⚙️"}
-                decision = verdict.get("decision", "Unverifiable")
-                emoji = emoji_map.get(decision, "ℹ️")
-                tag = explanation.get("explanatory_tag", "N/A")
-                reasoning = verdict.get("reasoning", "No reasoning provided.")
-                corrected = explanation.get("corrected_news", "").strip()
+                summary_msg = format_whatsapp_reply(results)
 
-                summary_msg = (
-                    f"{emoji} *Verifact Summary*\n\n"
-                    f"🏷️ *Tag:* {tag}\n"
-                    f"🟩 *Verdict:* {decision}\n\n"
-                    f"🧠 *Reasoning:* {reasoning}\n\n"
-                    f"✅ *Corrected Info:*\n{corrected}"
-                )
-
+                # Send the main verdict / error message
                 await asyncio.to_thread(
                     twilio_client.messages.create,
                     body=summary_msg,
@@ -553,37 +550,39 @@ async def whatsapp_webhook(
                 )
                 await asyncio.sleep(1)
 
-                # ---- 2️⃣ Create Detailed Explainability Message ----
-                explain_parts = []
-                detailed_expl = explanation.get("claim_breakdown", [])
-                for idx, claim in enumerate(detailed_expl, start=1):
-                    subclaim = claim.get("sub_claim", "")
-                    status = claim.get("status", "")
-                    evidence = claim.get("evidence", "")
-                    reason = claim.get("reason_for_decision", "")
-                    sources = claim.get("source_url", "")
-
-                    explain_parts.append(
-                        f"🔹 *Sub-Claim {idx}:* {subclaim}\n"
-                        f"📊 *Status:* {status}\n\n"
-                        f"📚 *Evidence:*\n{evidence}\n\n"
-                        f"💡 *Reason:*\n{reason}\n"
-                        f"🌐 *Sources:*\n{sources}\n"
-                        f"{'-'*40}"
-                    )
-
-                if explain_parts:
-                    explain_text = "*🧩 Detailed Explainability:*\n\n" + "\n\n".join(explain_parts)
-                    # Split into chunks if long
-                    MAX_LEN = 1500
-                    for i in range(0, len(explain_text), MAX_LEN):
-                        await asyncio.to_thread(
-                            twilio_client.messages.create,
-                            body=explain_text[i:i+MAX_LEN],
-                            from_=TWILIO_PHONE_NUMBER,
-                            to=From
+                # ---- 2️⃣ Create Detailed Explainability Message if successful ----
+                if "error" not in results:
+                    explanation = results.get("explanation", {})
+                    explain_parts = []
+                    detailed_expl = explanation.get("claim_breakdown", [])
+                    for idx, claim in enumerate(detailed_expl, start=1):
+                        subclaim = claim.get("sub_claim", "")
+                        status = claim.get("status", "")
+                        evidence = claim.get("evidence", "")
+                        reason = claim.get("reason_for_decision", "")
+                        sources = claim.get("source_url", "")
+    
+                        explain_parts.append(
+                            f"🔹 *Sub-Claim {idx}:* {subclaim}\n"
+                            f"📊 *Status:* {status}\n\n"
+                            f"📚 *Evidence:*\n{evidence}\n\n"
+                            f"💡 *Reason:*\n{reason}\n"
+                            f"🌐 *Sources:*\n{sources}\n"
+                            f"{'-'*40}"
                         )
-                        await asyncio.sleep(1)
+    
+                    if explain_parts:
+                        explain_text = "*🧩 Detailed Explainability:*\n\n" + "\n\n".join(explain_parts)
+                        # Split into chunks if long
+                        MAX_LEN = 1500
+                        for i in range(0, len(explain_text), MAX_LEN):
+                            await asyncio.to_thread(
+                                twilio_client.messages.create,
+                                body=explain_text[i:i+MAX_LEN],
+                                from_=TWILIO_PHONE_NUMBER,
+                                to=From
+                            )
+                            await asyncio.sleep(1)
                 print("✅ WhatsApp analysis complete.")
             else:
                 await asyncio.to_thread(
