@@ -1,5 +1,6 @@
 # ---------------- Core Imports ----------------
 import os
+import gc
 import asyncio
 import time
 import re
@@ -22,7 +23,7 @@ from langdetect import detect
 from newspaper import Article, Config
 from PIL import Image
 import pytesseract
-from transformers import pipeline
+from transformers import pipeline as hf_pipeline
 from moviepy import VideoFileClip
 
 
@@ -116,11 +117,24 @@ def get_text_from_image(uploaded_file):
         print(f"❌ Error extracting from image: {e}")
         return None
 
+# Singleton Whisper model — shared with server.py to avoid loading ~300MB per request
+_transcriber = None
+
+def _get_transcriber():
+    global _transcriber
+    if _transcriber is None:
+        print("🔄 Loading Whisper model (first time only)...")
+        _transcriber = hf_pipeline("automatic-speech-recognition", model="openai/whisper-base")
+        print("✅ Whisper model loaded and cached.")
+    return _transcriber
+
 def get_text_from_media(uploaded_file):
     """Transcribes text from an audio or video file using Whisper."""
+    temp_dir = "temp_media"
+    file_path = None
+    audio_path = None
+    video = None
     try:
-        # Save the uploaded file to a temporary path for processing
-        temp_dir = "temp_media"
         os.makedirs(temp_dir, exist_ok=True)
         file_path = os.path.join(temp_dir, uploaded_file.name)
 
@@ -128,36 +142,51 @@ def get_text_from_media(uploaded_file):
             f.write(uploaded_file.getbuffer())
 
         print("🎤 Transcribing media file (this may take a moment)...")
-        # Check if it's a video file and extract audio
         if file_path.lower().endswith(('.mp4', '.mov', '.avi')):
             video = VideoFileClip(file_path)
             audio_path = os.path.join(temp_dir, "temp_audio.wav")
             video.audio.write_audiofile(audio_path, codec='pcm_s16le')
+            # Close video immediately to free FFmpeg memory
+            video.close()
+            video = None
+            gc.collect()
             media_to_transcribe = audio_path
         else:
             media_to_transcribe = file_path
 
-        transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-base")
+        transcriber = _get_transcriber()
         result = transcriber(media_to_transcribe)
         text = result["text"]
-
-        # Clean up temporary files
-        os.remove(file_path)
-        if 'audio_path' in locals() and os.path.exists(audio_path):
-            os.remove(audio_path)
-        if not os.listdir(temp_dir):
-            os.rmdir(temp_dir)
 
         print("✅ Transcription complete.")
         return text
     except Exception as e:
         print(f"❌ Error transcribing media: {e}")
-        # Clean up in case of error
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)
-        if 'audio_path' in locals() and os.path.exists(audio_path):
-            os.remove(audio_path)
         return None
+    finally:
+        # Always close video if still open
+        if video is not None:
+            try:
+                video.close()
+            except Exception:
+                pass
+        # Clean up temporary files
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
+        if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+            try:
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
+        gc.collect()
 
 # ---------------- Language Detection & Translation ----------------
 def detect_language(text):

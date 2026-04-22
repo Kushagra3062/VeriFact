@@ -42,6 +42,7 @@ soundfile
 
 # --- Utilities & Other ---
 python-dotenv
+cachetools
 streamlit
 tavily-python
 twilio

@@ -1,5 +1,6 @@
 # ---------------- Core Imports ----------------
 import os
+import gc
 import importlib
 import asyncio
 import re
@@ -20,7 +21,7 @@ from PIL import Image
 import pytesseract
 
 from moviepy import VideoFileClip
-from transformers import pipeline
+from transformers import pipeline as hf_pipeline
 
 # ---------------- Twilio Imports (NEW) ----------------
 from twilio.rest import Client as TwilioClient
@@ -35,6 +36,20 @@ import requests
 # ---------------- App Setup ----------------
 app = FastAPI()
 cache = TTLCache(maxsize=500, ttl=3600)
+
+# ---------------- Singleton Whisper Model ----------------
+# Cache the model so it's loaded once (~300MB) rather than per-request
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB upload limit
+_transcriber = None
+
+def get_transcriber():
+    global _transcriber
+    if _transcriber is None:
+        print("🔄 Loading Whisper model (first time only)...")
+        _transcriber = hf_pipeline("automatic-speech-recognition", model="openai/whisper-base")
+        print("✅ Whisper model loaded and cached.")
+    return _transcriber
+
 @app.get("/")
 def read_root():
     return {"status": "ok"}
@@ -116,26 +131,42 @@ def get_text_from_image_server(image_path):
         return None
 
 def get_text_from_media_server(media_path):
+    audio_path_to_process = media_path
+    video = None
     try:
         print("🎤 Transcribing media file...")
-        audio_path_to_process = media_path
         if media_path.lower().endswith(('.mp4', '.mov', '.avi')):
             print("📹 Video file detected. Extracting audio...")
             video = VideoFileClip(media_path)
             audio_path_to_process = "temp_audio.wav"
             video.audio.write_audiofile(audio_path_to_process, codec='pcm_s16le')
+            # Close video immediately to free FFmpeg memory
+            video.close()
+            video = None
+            gc.collect()
 
-        transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-base")
+        transcriber = get_transcriber()
         result = transcriber(audio_path_to_process, return_timestamps=True)
-
-        if audio_path_to_process != media_path and os.path.exists(audio_path_to_process):
-            os.remove(audio_path_to_process)
 
         print("✅ Transcription complete.")
         return result["text"]
     except Exception as e:
         print(f"❌ Error transcribing media: {e}")
         return None
+    finally:
+        # Always close video if still open
+        if video is not None:
+            try:
+                video.close()
+            except Exception:
+                pass
+        # Always clean up temp audio
+        if audio_path_to_process != media_path and os.path.exists(audio_path_to_process):
+            try:
+                os.remove(audio_path_to_process)
+            except Exception:
+                pass
+        gc.collect()
 
 # ---------------- Pipeline Runner (Existing) ----------------
 async def run_analysis_pipeline(input_text: str):
@@ -204,14 +235,25 @@ async def analyze_file(file: UploadFile = File(...)):
     raw_text = None
     
     try:
-        content = await file.read()
-        print(f"Received file: {file.filename} ({len(content)} bytes)")
-        
-        if len(content) == 0:
-             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-             
+        # Stream file to disk in chunks to avoid buffering entire video in RAM
+        total_size = 0
         with open(temp_path, "wb") as f:
-            f.write(content)
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1 MB chunks
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB."
+                    )
+                f.write(chunk)
+
+        print(f"Received file: {file.filename} ({total_size} bytes)")
+        
+        if total_size == 0:
+             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         ext = file.filename.split(".")[-1].lower()
         if ext in ["png", "jpg", "jpeg"]:
@@ -244,6 +286,7 @@ async def analyze_file(file: UploadFile = File(...)):
                 os.remove(temp_path)
             except:
                 pass
+        gc.collect()
 
 
 # ---------------- NEW WHATSAPP WEBHOOK ----------------
