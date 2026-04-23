@@ -1,5 +1,6 @@
 # ---------------- Core Imports ----------------
 import os
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 import gc
 import importlib
 import asyncio
@@ -437,7 +438,8 @@ async def whatsapp_webhook(
                 url = upload_to_imgbb(heatmap_path)
             except Exception as e:
                 print(f"❌ Error uploading image to imgbb: {e}")
-                url = "Image upload failed."
+                url = None
+            
             # Send prediction result
             result_msg = (
                 f"🤖 *Deepfake Analysis Result*\n\n"
@@ -454,33 +456,41 @@ async def whatsapp_webhook(
             )
 
             # Send heatmap image
-            await asyncio.to_thread(
-                twilio_client.messages.create,
-                media_url=[url],  # <-- replace with your media hosting path
-                from_=TWILIO_PHONE_NUMBER,
-                to=From
-            )
+            if url and url.startswith("http"):
+                await asyncio.to_thread(
+                    twilio_client.messages.create,
+                    media_url=[url],  # <-- replace with your media hosting path
+                    from_=TWILIO_PHONE_NUMBER,
+                    to=From
+                )
+            else:
+                await asyncio.to_thread(
+                    twilio_client.messages.create,
+                    body="⚠️ Failed to upload and attach the explainability heatmap, but analysis completed.",
+                    from_=TWILIO_PHONE_NUMBER,
+                    to=From
+                )
 
         except Exception as e:
             print(f"❌ Deepfake detection error: {e}")
             await asyncio.to_thread(
                 twilio_client.messages.create,
-                body=f"⚠️ Error during Deepfake detection: {e}",
+                body=f"⚠️ Error during Deepfake detection: {RuntimeError('Server Memory Limit Exceeded or Heatmap Gen Failed. Try Claim Verification instead.')}",
                 from_=TWILIO_PHONE_NUMBER,
                 to=From
             )
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-
-        # After result, return to main menu
-        user_state[From] = "awaiting_main_choice"
-        await asyncio.to_thread(
-            twilio_client.messages.create,
-            body="✅ Analysis complete.\n\nReply *1* for Claim Verification or *2* for another Deepfake check.",
-            from_=TWILIO_PHONE_NUMBER,
-            to=From
-        )
+            
+            # ENSURE user is not locked out
+            user_state[From] = "awaiting_main_choice"
+            await asyncio.to_thread(
+                twilio_client.messages.create,
+                body="✅ Analysis complete.\n\nReply *1* for Claim Verification or *2* for another Deepfake check.",
+                from_=TWILIO_PHONE_NUMBER,
+                to=From
+            )
         return Response(status_code=200)
 
     # 🧩 4. Claim Verification Flow (unchanged from your original)
